@@ -8,6 +8,38 @@ Starting the debugger
 bkpt <executable name>
 ```
 
+## Breakpoints
+
+Breakpoints are set with
+
+```
+b set <location> 
+```
+
+where `location` is either:
+
+  * an address in hexidecimal form
+  * a function name
+  * a line number
+
+> `b` is aliased to `br`, `break`, `bkpt`
+
+They are unset with
+
+```
+b unset <bkpt number>
+```
+
+The breakpoint number can be found by listing all breakpoints.
+
+List all breakpoints with
+
+```
+b list
+```
+
+> `list` is aliased to `ls`
+
 ## Resources
 
 - Series on [writing a debugger from scratch in Rust](https://www.timdbg.com/posts/writing-a-debugger-from-scratch-part-1/)
