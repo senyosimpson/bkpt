@@ -11,6 +11,12 @@ struct Debugger {
     pid: Pid,
 }
 
+enum Command {
+    Continue,
+    Break,
+    Unknown,
+}
+
 impl Debugger {
     pub fn new(pid: Pid) -> Debugger {
         Debugger { pid }
@@ -25,7 +31,7 @@ impl Debugger {
         loop {
             let readline = rl.readline("bpkt >> ");
             match readline {
-                Ok(line) => println!("line: {line}"),
+                Ok(line) => self.handle_input(line),
                 Err(ReadlineError::Interrupted) => {
                     println!("CTRL-C");
                     break;
@@ -36,6 +42,33 @@ impl Debugger {
                 }
                 Err(e) => println!("error: {:?}", e),
             }
+        }
+    }
+
+    pub fn handle_input(&self, line: String) {
+        let mut args = line.split(" ");
+
+        let cmd = Command::from(args.next().unwrap());
+        match cmd {
+            Command::Continue => {
+                let _ = ptrace::cont(self.pid, None);
+                // wait until signaled
+                let _ = waitpid(self.pid, None);
+            }
+            Command::Break => {
+                let addr = args.next().unwrap();
+            }
+            Command::Unknown => println!("Unknown command"),
+        }
+    }
+}
+
+impl From<&str> for Command {
+    fn from(cmd: &str) -> Self {
+        match cmd {
+            "c" | "cont" | "continue" => Command::Continue,
+            "b" | "br" | "break" => Command::Break,
+            _ => Command::Unknown,
         }
     }
 }
