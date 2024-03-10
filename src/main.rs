@@ -1,7 +1,9 @@
-use std::ffi::CString;
+use std::collections::HashMap;
+use std::ffi::{c_void, CString};
 
 use clap::Parser;
-use nix::sys::ptrace;
+use nix::sys::personality;
+use nix::sys::ptrace::{self, AddressType};
 use nix::sys::wait::waitpid;
 use nix::unistd::{execvp, fork, ForkResult, Pid};
 use rustyline::error::ReadlineError;
@@ -9,6 +11,22 @@ use rustyline::DefaultEditor;
 
 struct Debugger {
     pid: Pid,
+    breakpoints: HashMap<Location, Breakpoint>,
+}
+
+struct Breakpoint {
+    pid: Pid,
+    addr: Location,
+    enabled: bool,
+    old_instruction: isize,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum Location {
+    Address(isize),
+    // TODO: Support these options
+    Function(String),
+    Line(u64),
 }
 
 enum Command {
@@ -19,17 +37,20 @@ enum Command {
 
 impl Debugger {
     pub fn new(pid: Pid) -> Debugger {
-        Debugger { pid }
+        Debugger {
+            pid,
+            breakpoints: HashMap::new(),
+        }
     }
 
-    pub fn run(&self) {
+    pub fn run(&mut self) {
         // wait for process to start. we get a signal because of the ptrace.
         // once we get that, we can proceed
         let _ = waitpid(self.pid, None);
 
         let mut rl = DefaultEditor::new().unwrap();
         loop {
-            let readline = rl.readline("bpkt >> ");
+            let readline = rl.readline(">>> ");
             match readline {
                 Ok(line) => self.handle_input(line),
                 Err(ReadlineError::Interrupted) => {
@@ -45,7 +66,7 @@ impl Debugger {
         }
     }
 
-    pub fn handle_input(&self, line: String) {
+    pub fn handle_input(&mut self, line: String) {
         let mut args = line.split(" ");
 
         let cmd = Command::from(args.next().unwrap());
@@ -56,10 +77,23 @@ impl Debugger {
                 let _ = waitpid(self.pid, None);
             }
             Command::Break => {
-                let addr = args.next().unwrap();
+                let loc = {
+                    let a = args.next().unwrap().strip_prefix("0x").unwrap();
+                    let addr = isize::from_str_radix(a, 16).unwrap();
+                    Location::Address(addr)
+                };
+
+                self.set_breakpoint(loc);
             }
             Command::Unknown => println!("Unknown command"),
         }
+    }
+
+    fn set_breakpoint(&mut self, addr: Location) {
+        let mut bp = Breakpoint::new(self.pid, addr.clone());
+        bp.enable();
+        self.breakpoints.insert(addr.clone(), bp);
+        println!("Breakpoint set at {:#?}", addr);
     }
 }
 
@@ -67,9 +101,60 @@ impl From<&str> for Command {
     fn from(cmd: &str) -> Self {
         match cmd {
             "c" | "cont" | "continue" => Command::Continue,
-            "b" | "br" | "break" => Command::Break,
+            "b" | "br" | "break" | "bkpt" => Command::Break,
             _ => Command::Unknown,
         }
+    }
+}
+
+impl Breakpoint {
+    const BKPT_OPCODE: isize = 0xcc;
+    const OPCODE_BITMASK: isize = 0xff;
+
+    pub fn new(pid: Pid, addr: Location) -> Breakpoint {
+        Breakpoint {
+            pid,
+            addr,
+            enabled: false,
+            old_instruction: 0,
+        }
+    }
+
+    pub fn enable(&mut self) {
+        let ptr = match self.addr {
+            Location::Address(addr) => {
+                println!("Got address {:08x}", addr);
+                addr as AddressType
+            }
+            Location::Function(_) => todo!(),
+            Location::Line(_) => todo!(),
+        };
+
+        let data = ptrace::read(self.pid, ptr).unwrap() as isize;
+
+        let old_int = data & Self::OPCODE_BITMASK;
+        let bkpt = (data & !Self::OPCODE_BITMASK) | Self::BKPT_OPCODE;
+
+        unsafe {
+            // TODO: Sanity check
+            ptrace::write(self.pid, ptr, &bkpt as *const _ as *mut c_void).unwrap();
+        }
+
+        self.old_instruction = old_int;
+        self.enabled = true;
+    }
+
+    pub fn disable(&mut self) {
+        let ptr = &self.addr as *const _ as AddressType;
+        let data = ptrace::read(self.pid, ptr).unwrap() as isize;
+
+        let prev_data = (data & !Self::OPCODE_BITMASK) | self.old_instruction;
+        unsafe {
+            ptrace::write(self.pid, ptr, &prev_data as *const _ as *mut c_void).unwrap();
+        }
+
+        self.old_instruction = 0;
+        self.enabled = false;
     }
 }
 
@@ -104,6 +189,10 @@ fn main() {
                 cmd.append(&mut argv);
             }
 
+            // Switch off address space layout randomization
+            let pers = personality::get().unwrap();
+            personality::set(pers | personality::Persona::ADDR_NO_RANDOMIZE).unwrap();
+
             if let Err(e) = execvp(&cmd[0], &cmd) {
                 println!("failed to call program. error: {e}");
                 return;
@@ -111,7 +200,7 @@ fn main() {
         }
         Ok(ForkResult::Parent { child }) => {
             println!("start debugging proces for pid {child}");
-            let dbg = Debugger::new(child);
+            let mut dbg = Debugger::new(child);
             dbg.run();
         }
     }
