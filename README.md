@@ -1,11 +1,13 @@
 # bkpt
 
-## API
+A debugger built to learn about debuggers
+
+## Usage
 
 Starting the debugger
 
 ```
-bkpt <executable name>
+bkpt <executable>
 ```
 
 ## Breakpoints
