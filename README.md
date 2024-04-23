@@ -42,6 +42,28 @@ b list
 
 > `list` is aliased to `ls`
 
+## Registers
+
+To read from a register
+
+```
+r read <register>
+```
+
+To write from a register
+
+```
+r write <register>
+```
+
+> `r` is aliased to `reg`, `register`
+
+> `read` is aliased to `r`, `write` is alised to `w`
+
+## Program information
+
+Information about the program can be queried using the `info <type>` command
+
 ## Resources
 
 - Series on [writing a debugger from scratch in Rust](https://www.timdbg.com/posts/writing-a-debugger-from-scratch-part-1/)
