@@ -28,27 +28,15 @@ enum Command {
 }
 
 enum RegisterOp {
-    Read,
-    Write(isize),
-    Unknown,
-}
-
-struct RegisterCmd {
-    op: RegisterOp,
-    register: Register,
-}
-
-enum BreakpointCmd {
-    List,
-    Set(Location),
-    Unset(u8),
+    Read { reg: Register },
+    Write { reg: Register, value: isize },
     Unknown,
 }
 
 enum BreakpointOp {
     List,
-    Set,
-    Unset,
+    Set(Location),
+    Unset(u8),
     Unknown,
 }
 
@@ -93,12 +81,12 @@ impl Debugger {
                 let _ = waitpid(self.pid, None);
             }
             Command::Break => {
-                let (_, breakpoint_cmd) = parse_bkpt_cmd(args).unwrap();
-                match breakpoint_cmd {
-                    BreakpointCmd::List => println!("List breakpoints"),
-                    BreakpointCmd::Set(_) => println!("Set breakpoint"),
-                    BreakpointCmd::Unset(num) => println!("Unset breakpoint: {num}"),
-                    BreakpointCmd::Unknown => println!("Unknown breakpoint command"),
+                let (_, op) = parse_bkpt_cmd(args).unwrap();
+                match op {
+                    BreakpointOp::List => println!("List breakpoints"),
+                    BreakpointOp::Set(_) => println!("Set breakpoint"),
+                    BreakpointOp::Unset(num) => println!("Unset breakpoint: {num}"),
+                    BreakpointOp::Unknown => println!("Unknown breakpoint command"),
                 }
                 // let loc = {
                 //     let a = args.next().unwrap().strip_prefix("0x").unwrap();
@@ -109,13 +97,13 @@ impl Debugger {
                 // self.set_breakpoint(loc);
             }
             Command::Register => {
-                let (_, register_cmd) = parse_reg_cmd(args).unwrap();
-                match register_cmd.op {
-                    RegisterOp::Read => {
-                        let value = register_cmd.register.read(self.pid);
+                let (_, op) = parse_reg_cmd(args).unwrap();
+                match op {
+                    RegisterOp::Read { reg } => {
+                        let value = reg.read(self.pid);
                         println!("{value:0x}");
                     }
-                    RegisterOp::Write(value) => register_cmd.register.write(self.pid, value as u64),
+                    RegisterOp::Write { reg, value } => reg.write(self.pid, value as u64),
                     RegisterOp::Unknown => {
                         println!("Unknown register command")
                     }
@@ -135,11 +123,16 @@ impl Debugger {
 
 // ===== RegisterOp =====
 
-impl From<(&str, Option<isize>)> for RegisterOp {
-    fn from(op: (&str, Option<isize>)) -> Self {
-        match op.0 {
-            "r" | "read" => RegisterOp::Read,
-            "w" | "Write" => RegisterOp::Write(op.1.unwrap()),
+impl RegisterOp {
+    fn new(op: &str, reg: &str, write: Option<isize>) -> RegisterOp {
+        let reg = Register::from_selector(RegisterSelector::Name(reg));
+        match op {
+            "r" | "read" => RegisterOp::Read { reg },
+            "w" | "write" => RegisterOp::Write {
+                reg,
+                // TODO: Fix unwrap
+                value: write.unwrap(),
+            },
             _ => RegisterOp::Unknown,
         }
     }
@@ -147,12 +140,12 @@ impl From<(&str, Option<isize>)> for RegisterOp {
 
 // ===== BreakpointOp =====
 
-impl From<&str> for BreakpointOp {
-    fn from(op: &str) -> Self {
+impl BreakpointOp {
+    fn new(op: &str, bkpt_num: Option<u8>, addr: Option<Location>) -> Self {
         match op {
             "ls" | "list" => BreakpointOp::List,
-            "set" => BreakpointOp::Set,
-            "unset" => BreakpointOp::Unset,
+            "set" => BreakpointOp::Set(addr.unwrap()),
+            "unset" => BreakpointOp::Unset(bkpt_num.unwrap()),
             _ => BreakpointOp::Unknown,
         }
     }
@@ -172,17 +165,19 @@ impl From<&str> for Command {
 }
 
 fn parse_cmd(input: &str) -> IResult<&str, Command> {
-    let (rem, cmd) = until_whitespace_or_eof(input)?;
+    let (rem, cmd) = until_space_or_eof(input)?;
     let cmd = Command::from(cmd);
 
     Ok((rem, cmd))
 }
 
-fn parse_reg_cmd(input: &str) -> IResult<&str, RegisterCmd> {
-    let (rem, (_, op)) = pair(space1, until_whitespace_or_eof)(input)?;
+fn parse_reg_cmd(input: &str) -> IResult<&str, RegisterOp> {
+    let (rem, op) = take_space_then_until_space_or_eof(input)?;
+
     // now we have to parse the register. it can be in the format of the register name or a dwarf no.
     // TODO: Implement parsing a dwarf no
-    let (rem, (_, reg)) = pair(space1, until_whitespace_or_eof)(rem)?;
+    let (rem, reg) = take_space_then_until_space_or_eof(rem)?;
+
     // If we have a write command, rem will have a value
     let mut value = None;
     if !rem.is_empty() {
@@ -190,50 +185,36 @@ fn parse_reg_cmd(input: &str) -> IResult<&str, RegisterCmd> {
         value = Some(v);
     }
 
-    let op = match value {
-        Some(v) => RegisterOp::from((op, Some(v))),
-        None => RegisterOp::from((op, None)),
-    };
-
-    let cmd = RegisterCmd {
-        op,
-        register: Register::from_selector(RegisterSelector::Name(reg)),
-    };
-
-    Ok(("", cmd))
+    let op = RegisterOp::new(op, reg, value);
+    Ok(("", op))
 }
 
-fn parse_bkpt_cmd(input: &str) -> IResult<&str, BreakpointCmd> {
-    let (rem, (_, op)) = pair(space1, until_whitespace_or_eof)(input)?;
-    let op = BreakpointOp::from(op);
+fn parse_bkpt_cmd(input: &str) -> IResult<&str, BreakpointOp> {
+    let (rem, op) = take_space_then_until_space_or_eof(input)?;
+    let (_, addr) = take_space_then_until_space_or_eof(rem)?;
 
-    match op {
-        // Get the location
-        BreakpointOp::Set => {
-            let (_, (_, addr)) = pair(space1, until_whitespace_or_eof)(rem)?;
-            // TODO: Fix address
-            Ok(("", BreakpointCmd::Set(Location::Address(0x1234))))
-        }
-        // Get the breakpoint number
-        BreakpointOp::Unset => {
-            let (_, (_, num)) = pair(space1, until_whitespace_or_eof)(rem)?;
-            let (_, num) = parse_number(num)?;
-            Ok(("", BreakpointCmd::Unset(num as u8)))
-        }
-        BreakpointOp::List => Ok(("", BreakpointCmd::List)),
-        BreakpointOp::Unknown => Ok(("", BreakpointCmd::Unknown)),
-    }
+    let (_, num) = take_space_then_until_space_or_eof(rem)?;
+    let (_, num) = parse_number(num)?;
+
+    let op = BreakpointOp::new(op);
+
+    Ok(("", op))
 }
 
-fn until_whitespace_or_eof(input: &str) -> IResult<&str, &str> {
-    match until_whitespace(input) {
+fn take_space_then_until_space_or_eof(input: &str) -> IResult<&str, &str> {
+    let (rem, (_, op)) = pair(space1, until_space_or_eof)(input)?;
+    Ok((rem, op))
+}
+
+fn until_space_or_eof(input: &str) -> IResult<&str, &str> {
+    match until_space(input) {
         Ok(res) => Ok(res),
         Err(Err::Error(e)) if e.code == ErrorKind::TakeUntil => Ok(("", e.input)),
         Err(e) => Err(e),
     }
 }
 
-fn until_whitespace(input: &str) -> IResult<&str, &str> {
+fn until_space(input: &str) -> IResult<&str, &str> {
     take_until(" ")(input)
 }
 
